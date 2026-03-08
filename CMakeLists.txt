@@ -1,1 +1,1 @@
-idf_component_register(SRCS "main.c" INCLUDE_DIRS "include")
+idf_component_register(SRCS "zh_tachometer.c" INCLUDE_DIRS "include" REQUIRES driver esp_timer)

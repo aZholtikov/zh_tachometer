@@ -37,7 +37,7 @@ esp_err_t zh_tachometer_init(const zh_tachometer_init_config_t *config, zh_tacho
     return ESP_OK;
 }
 
-esp_err_t zh_tachometer_deinit(zh_tachometer_handle_t *handle)
+esp_err_t zh_tachometer_deinit(zh_tachometer_handle_t *handle) // -V2008
 {
     ZH_LOGI("Tachometer deinitialization started.");
     ZH_ERROR_CHECK(handle != NULL, ESP_ERR_INVALID_ARG, NULL, "Tachometer deinitialization failed. Invalid argument.");
@@ -172,7 +172,7 @@ static esp_err_t _zh_tachometer_pcnt_init(const zh_tachometer_init_config_t *con
                    ZH_ERROR_CHECK(err == ESP_OK, err, NULL, "PCNT delete unit fail."), "PCNT initialization failed.");
     if (config->pullup == false)
     {
-        esp_err_t err = gpio_pullup_dis((gpio_num_t)config->a_gpio_number);
+        err = gpio_pullup_dis((gpio_num_t)config->a_gpio_number);
         ZH_ERROR_CHECK(err == ESP_OK, err, NULL, "Gpio pullup disable fail.");
         err = gpio_pullup_dis((gpio_num_t)config->b_gpio_number);
         ZH_ERROR_CHECK(err == ESP_OK, err, NULL, "Gpio pullup disable fail.");

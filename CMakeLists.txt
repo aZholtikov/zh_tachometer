@@ -3,5 +3,4 @@ if(${IDF_VERSION_MAJOR} STREQUAL 6)
 else()
     set(requires driver esp_timer)
 endif()
-
 idf_component_register(SRCS "zh_tachometer.c" INCLUDE_DIRS "include" REQUIRES ${requires})

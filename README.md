@@ -8,6 +8,10 @@
 
 [PVS-Studio](https://pvs-studio.com/pvs-studio/?utm_source=website&utm_medium=github&utm_campaign=open_source) - static analyzer for C, C++, C#, and Java code.
 
+## Features
+
+1. Support up to 8 tachometers on one device.
+
 ## Attention
 
 1. For correct operation, please enable the following settings in the menuconfig:

@@ -1,9 +1,28 @@
 /**
  * @file zh_tachometer.h
+ *
+ * @brief ESP-IDF driver for a quadrature encoder-based tachometer using PCNT
+ *        and ESP-Timer to measure rotational speed in RPM.
+ *
+ * The module leverages the ESP-IDF PCNT peripheral in quadrature decoder mode
+ * to count encoder pulses and an ESP-Timer running at 10 Hz to sample the
+ * accumulated count and compute RPM. The result is a non-blocking, RTOS-friendly
+ * interface suitable for motor speed monitoring.
+ *
+ * Key features:
+ * - Quadrature encoder support via two GPIO lines (A/B phases)
+ * - Automatic RPM calculation based on configurable pulses-per-revolution
+ * - Configurable GPIO pull-up resistors
+ * - Thread-safe access through FreeRTOS-compatible handles
+ *
+ * @note The internal PCNT unit uses accumulation mode with watch points at
+ *       ±32767. RPM values above 32767 may overflow — ensure the encoder
+ *       pulses-per-revolution and expected RPM range stay within safe bounds.
  */
 
 #pragma once
 
+#include "math.h"
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include "driver/pulse_cnt.h"
@@ -11,9 +30,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-/**
- * @brief Tachometer initial default values.
- */
 #define ZH_TACHOMETER_INIT_CONFIG_DEFAULT() \
     {                                       \
         .a_gpio_number = GPIO_NUM_MAX,      \
@@ -27,62 +43,84 @@ extern "C"
 #endif
 
     /**
-     * @brief Structure for initial initialization of tachometer.
+     * @brief Opaque handle to the tachometer instance.
+     *
+     * Used to identify and access a specific tachometer throughout its
+     * lifetime. The internal structure is defined in the implementation
+     * file and must not be accessed directly.
+     */
+    typedef struct _zh_tachometer_handle_t zh_tachometer_handle_t;
+
+    /**
+     * @brief Initialization configuration for the quadrature encoder tachometer.
+     *
+     * This structure is passed to `zh_tachometer_init()` to configure the GPIO
+     * pins, pull-up resistors, and the encoder's pulses-per-revolution ratio.
+     *
+     * @note Both GPIO pins must be assigned before initialization.
+     *       Use GPIO_NUM_MAX to indicate an unassigned pin.
      */
     typedef struct
     {
-        uint8_t a_gpio_number;   /*!< Encoder A GPIO number. */
-        uint8_t b_gpio_number;   /*!< Encoder B GPIO number. */
-        bool pullup;             /*!< Pullup GPIO enable/disable. */
-        uint16_t encoder_pulses; /*!< Number of pulses per one rotation. */
+        uint8_t a_gpio_number;   /*!< Encoder A phase GPIO number */
+        uint8_t b_gpio_number;   /*!< Encoder B phase GPIO number */
+        bool pullup;             /*!< Enable or disable GPIO pull-up resistors */
+        uint16_t encoder_pulses; /*!< Number of pulses per one full rotation */
     } zh_tachometer_init_config_t;
 
     /**
-     * @brief Tachometer handle.
+     * @brief Initialize the tachometer with the provided configuration.
+     *
+     * Allocates a handle, configures the ESP-Timer (10 Hz sampling), and sets up
+     * the PCNT peripheral in quadrature decoder mode with glitch filtering.
+     *
+     * @param[in] config Pointer to the initialization configuration (must not be NULL)
+     * @param[out] handle Pointer to receive the created tachometer handle (must be NULL)
+     *
+     * @return ESP_OK on success
+     * @return ESP_ERR_INVALID_ARG if `config` or `handle` is NULL, or `encoder_pulses` is zero
+     * @return ESP_ERR_INVALID_STATE if the handle is already initialized.
+     * @return ESP_ERR_NO_MEM if memory allocation fails
+     * @return ESP_FAIL if PCNT initialization or configuration failed
+     *
      */
-    typedef struct
-    {
-        pcnt_unit_handle_t pcnt_unit_handle;         /*!< Tachometer unique pcnt unit handle. */
-        pcnt_channel_handle_t pcnt_channel_a_handle; /*!< Tachometer unique pcnt channel handle. */
-        pcnt_channel_handle_t pcnt_channel_b_handle; /*!< Tachometer unique pcnt channel handle. */
-        esp_timer_handle_t esp_timer_handle;         /*!< Tachometer unique timer handle. */
-        uint16_t value;                              /*!< Tachometer value. */
-        uint16_t encoder_pulses;                     /*!< Number of pulses per one rotation. */
-        bool is_initialized;                         /*!< Tachometer initialization flag. */
-    } zh_tachometer_handle_t;
+    esp_err_t zh_tachometer_init(const zh_tachometer_init_config_t *config, zh_tachometer_handle_t **handle);
 
     /**
-     * @brief Initialize tachometer.
+     * @brief Deinitialize the tachometer and release all resources.
      *
-     * @param[in] config Pointer to tachometer initialized configuration structure. Can point to a temporary variable.
-     * @param[out] handle Pointer to unique tachometer handle.
+     * Stops the PCNT unit, removes channels and watch points, deletes the
+     * ESP-Timer, and frees the handle memory. The handle pointer is set to
+     * NULL on success.
      *
-     * @note Before initialize the tachometer recommend initialize zh_tachometer_init_config_t structure with default values.
+     * @param[in,out] handle Pointer to the tachometer handle (must not be NULL)
      *
-     * @code zh_tachometer_init_config_t config = ZH_TACHOMETER_INIT_CONFIG_DEFAULT() @endcode
+     * @note After deinitialization, the handle is invalidated and must not be
+     *       used. Call zh_tachometer_init() again to reinitialize.
      *
-     * @return ESP_OK if success or an error code otherwise.
+     * @return ESP_OK on success
+     * @return ESP_ERR_INVALID_ARG if `handle` is NULL or `*handle` is NULL
+     * @return ESP_FAIL if PCNT stop, disable, or deletion failed
      */
-    esp_err_t zh_tachometer_init(const zh_tachometer_init_config_t *config, zh_tachometer_handle_t *handle);
+    esp_err_t zh_tachometer_deinit(zh_tachometer_handle_t **handle);
 
     /**
-     * @brief Deinitialize tachometer.
+     * @brief Retrieve the current RPM value from the tachometer.
      *
-     * @param[in, out] handle Pointer to unique tachometer handle.
+     * Returns the last sampled RPM value computed by the timer callback.
+     * The value represents absolute RPM (direction is discarded); negative
+     * rotation is reported as a positive value.
      *
-     * @return ESP_OK if success or an error code otherwise.
+     * @param[in] handle Pointer to the tachometer handle (must not be NULL)
+     * @param[out] value Pointer to receive the RPM value (must not be NULL)
+     *
+     * @return ESP_OK on success
+     * @return ESP_ERR_INVALID_ARG if `handle` or `value` is NULL
+     *
+     * @note This function is non-blocking and returns the most recent value
+     *       without accessing the PCNT peripheral directly.
      */
-    esp_err_t zh_tachometer_deinit(zh_tachometer_handle_t *handle);
-
-    /**
-     * @brief Get tachometer value.
-     *
-     * @param[in] handle Pointer to unique tachometer handle.
-     * @param[out] value Tachometer value.
-     *
-     * @return ESP_OK if success or an error code otherwise.
-     */
-    esp_err_t zh_tachometer_get(const zh_tachometer_handle_t *handle, uint16_t *value);
+    esp_err_t zh_tachometer_get(zh_tachometer_handle_t **handle, uint16_t *value);
 
 #ifdef __cplusplus
 }

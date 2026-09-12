@@ -1,9 +1,5 @@
 # ESP32 ESP-IDF component for tachometer (via rotary optical encoder)
 
-## SAST Tools
-
-[PVS-Studio](https://pvs-studio.com/pvs-studio/?utm_source=website&utm_medium=github&utm_campaign=open_source) - static analyzer for C, C++, C#, and Java code.
-
 ## Features
 
 1. Quadrature encoder support via ESP-IDF PCNT peripheral in quadrature decoder mode.

@@ -97,7 +97,7 @@ static esp_err_t _zh_tachometer_timer_init(zh_tachometer_handle_t *handle);
  */
 static void _zh_tachometer_timer_on_alarm_cb(void *arg);
 
-esp_err_t zh_tachometer_init(const zh_tachometer_init_config_t *config, zh_tachometer_handle_t **handle) // -V2008
+esp_err_t zh_tachometer_init(const zh_tachometer_init_config_t *config, zh_tachometer_handle_t **handle)
 {
     ZH_LOGI("Tachometer initialization started.");
     ZH_ERROR_CHECK(config != NULL && handle != NULL, ESP_ERR_INVALID_ARG, NULL, "Tachometer initialization failed. Invalid argument.");
@@ -115,7 +115,7 @@ esp_err_t zh_tachometer_init(const zh_tachometer_init_config_t *config, zh_tacho
     return ESP_OK;
 }
 
-esp_err_t zh_tachometer_deinit(zh_tachometer_handle_t **handle) // -V2008
+esp_err_t zh_tachometer_deinit(zh_tachometer_handle_t **handle)
 {
     ZH_LOGI("Tachometer deinitialization started.");
     ZH_ERROR_CHECK(handle != NULL && *handle != NULL, ESP_ERR_INVALID_ARG, NULL, "Tachometer deinitialization failed. Invalid argument.");
@@ -149,7 +149,7 @@ static esp_err_t _zh_tachometer_validate_config(const zh_tachometer_init_config_
     return ESP_OK;
 }
 
-static esp_err_t _zh_tachometer_pcnt_init(const zh_tachometer_init_config_t *config, zh_tachometer_handle_t *handle) // -V2008
+static esp_err_t _zh_tachometer_pcnt_init(const zh_tachometer_init_config_t *config, zh_tachometer_handle_t *handle)
 {
     ZH_ERROR_CHECK(config->a_gpio_number < GPIO_NUM_MAX && config->b_gpio_number < GPIO_NUM_MAX, ESP_ERR_INVALID_ARG, NULL, "Invalid GPIO number.")
     ZH_ERROR_CHECK(config->a_gpio_number != config->b_gpio_number, ESP_ERR_INVALID_ARG, NULL, "Encoder A and B GPIO is same.")
@@ -255,5 +255,5 @@ static void IRAM_ATTR _zh_tachometer_timer_on_alarm_cb(void *arg)
     ZH_ERROR_CHECK_VOID(pcnt_unit_get_count(handle->pcnt_unit_handle, &pcnt_count) == ESP_OK, NULL, "PCNT internal error.");
     ZH_ERROR_CHECK_VOID(pcnt_unit_clear_count(handle->pcnt_unit_handle) == ESP_OK, NULL, "PCNT internal error.");
     float value_temp = ((pcnt_count * 100.0) / handle->encoder_pulses) * 60;
-    handle->value = (uint16_t)fabs(value_temp); // -V2004
+    handle->value = (uint16_t)fabs(value_temp);
 }

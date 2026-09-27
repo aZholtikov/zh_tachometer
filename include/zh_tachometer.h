@@ -5,7 +5,7 @@
  *        and ESP-Timer to measure rotational speed in RPM.
  *
  * The module leverages the ESP-IDF PCNT peripheral in quadrature decoder mode
- * to count encoder pulses and an ESP-Timer running at 10 Hz to sample the
+ * to count encoder pulses and an ESP-Timer running at 100 Hz to sample the
  * accumulated count and compute RPM. The result is a non-blocking, RTOS-friendly
  * interface suitable for motor speed monitoring.
  *
@@ -71,7 +71,7 @@ extern "C"
     /**
      * @brief Initialize the tachometer with the provided configuration.
      *
-     * Allocates a handle, configures the ESP-Timer (10 Hz sampling), and sets up
+     * Allocates a handle, configures the ESP-Timer (100 Hz sampling), and sets up
      * the PCNT peripheral in quadrature decoder mode with glitch filtering.
      *
      * @param[in] config Pointer to the initialization configuration (must not be NULL)
@@ -79,10 +79,9 @@ extern "C"
      *
      * @return ESP_OK on success
      * @return ESP_ERR_INVALID_ARG if `config` or `handle` is NULL, or `encoder_pulses` is zero
-     * @return ESP_ERR_INVALID_STATE if the handle is already initialized.
+     * @return ESP_ERR_INVALID_STATE if the handle is already initialized
      * @return ESP_ERR_NO_MEM if memory allocation fails
      * @return ESP_FAIL if PCNT initialization or configuration failed
-     *
      */
     esp_err_t zh_tachometer_init(const zh_tachometer_init_config_t *config, zh_tachometer_handle_t **handle);
 

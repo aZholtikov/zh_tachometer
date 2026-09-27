@@ -30,6 +30,8 @@
  *
  * @note This structure is opaque to callers and must only be accessed
  *       through the public API functions.
+ * @warning The timer callback runs from ISR context and must not call
+ *          blocking or long-running operations.
  */
 struct _zh_tachometer_handle_t
 {

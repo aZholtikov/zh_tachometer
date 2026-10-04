@@ -1,6 +1,6 @@
 #include "zh_tachometer.h"
 
-#define TAG "zh_tachometer"
+static const char *TAG = "zh_tachometer";
 
 #define ZH_LOGI(msg, ...) ESP_LOGI(TAG, msg, ##__VA_ARGS__)
 #define ZH_LOGE(msg, err, ...) ESP_LOGE(TAG, "[%s:%d:%s] " msg, __FILE__, __LINE__, esp_err_to_name(err), ##__VA_ARGS__)

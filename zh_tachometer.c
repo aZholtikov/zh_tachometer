@@ -21,6 +21,13 @@
         return;                                      \
     }
 
+#define ZH_ERROR_CHECK_CONT(cond, cleanup, msg, ...) \
+    if (!(cond))                                     \
+    {                                                \
+        ZH_LOGE(msg, ESP_FAIL, ##__VA_ARGS__);       \
+        cleanup;                                     \
+    }
+
 /**
  * @brief Internal handle structure for the tachometer driver.
  *
@@ -30,8 +37,10 @@
  *
  * @note This structure is opaque to callers and must only be accessed
  *       through the public API functions.
- * @warning The timer callback runs from ISR context and must not call
- *          blocking or long-running operations.
+ * @warning The timer callback runs from the esp_timer service task context
+ *          (default ESP_TIMER_TASK dispatch method), not from an ISR. Blocking
+ *          or long-running operations in the callback will delay other esp_timer
+ *          callbacks and must be avoided.
  */
 struct _zh_tachometer_handle_t
 {
@@ -39,7 +48,7 @@ struct _zh_tachometer_handle_t
     pcnt_channel_handle_t pcnt_channel_a_handle; /*!< PCNT channel A handle (edge detector) */
     pcnt_channel_handle_t pcnt_channel_b_handle; /*!< PCNT channel B handle (edge detector) */
     esp_timer_handle_t esp_timer_handle;         /*!< ESP-Timer handle for 100 Hz RPM sampling */
-    uint16_t value;                              /*!< Last computed RPM value (absolute) */
+    volatile uint16_t value;                     /*!< Last computed RPM value (absolute) */
     uint16_t encoder_pulses;                     /*!< Pulses per one full rotation */
 };
 
@@ -61,7 +70,7 @@ static esp_err_t _zh_tachometer_validate_config(const zh_tachometer_init_config_
  * Configures the PCNT unit with accumulation mode, glitch filter (1000 ns),
  * two channels for encoder phases A and B, edge/level actions for direction
  * counting, and watch points at ±32767. Starts the unit and clears the
- * counter. Optionally disables GPIO pull-ups if configured.
+ * counter. Configures GPIO pull-ups according to the `pullup` setting.
  *
  * @param config Pointer to the initialization configuration
  * @param handle Pointer to the initialized tachometer handle
@@ -88,11 +97,13 @@ static esp_err_t _zh_tachometer_timer_init(zh_tachometer_handle_t *handle);
 /**
  * @brief ESP-Timer alarm callback for RPM sampling.
  *
- * Executed every 10 ms from ISR context. Reads the accumulated PCNT count,
+ * Executed every 10 ms from the esp_timer service task context (default
+ * ESP_TIMER_TASK dispatch method). Reads the accumulated PCNT count,
  * clears it, and converts it to RPM using the formula:
  *
- *     RPM = (count * 100.0 / pulses_per_rev) * 60
+ *     RPM = (count * 100.0 / (4 * pulses_per_rev)) * 60
  *
+ * The factor of 4 accounts for quadrature encoding (4 edges per cycle).
  * The result is stored as an absolute value (direction discarded).
  *
  * @param arg Pointer to the tachometer handle
@@ -108,11 +119,11 @@ esp_err_t zh_tachometer_init(const zh_tachometer_init_config_t *config, zh_tacho
     *handle = heap_caps_calloc(1, sizeof(zh_tachometer_handle_t), MALLOC_CAP_8BIT);
     ZH_ERROR_CHECK(*handle != NULL, ESP_ERR_NO_MEM, NULL, "Tachometer initialization failed. Failed to allocate tachometer handle.");
     ZH_ERROR_CHECK(_zh_tachometer_timer_init(*handle) == ESP_OK, ESP_FAIL, heap_caps_free(*handle); *handle = NULL, "Tachometer initialization failed. Timer initialization failed.");
-    ZH_ERROR_CHECK(_zh_tachometer_pcnt_init(config, *handle) == ESP_OK, ESP_FAIL,
-                   {ZH_ERROR_CHECK(esp_timer_stop((*handle)->esp_timer_handle) == ESP_OK, ESP_FAIL, NULL, "Timer stop fail.")};
-                   {ZH_ERROR_CHECK(esp_timer_delete((*handle)->esp_timer_handle) == ESP_OK, ESP_FAIL, NULL, "Timer delete fail.")};
-                   heap_caps_free(*handle); *handle = NULL, "Tachometer initialization failed. PCNT initialization failed.");
     (*handle)->encoder_pulses = config->encoder_pulses;
+    ZH_ERROR_CHECK(_zh_tachometer_pcnt_init(config, *handle) == ESP_OK, ESP_FAIL,
+                   {ZH_ERROR_CHECK_CONT(esp_timer_stop((*handle)->esp_timer_handle) == ESP_OK, NULL, "Timer stop fail.")};
+                   {ZH_ERROR_CHECK_CONT(esp_timer_delete((*handle)->esp_timer_handle) == ESP_OK, NULL, "Timer delete fail.")};
+                   heap_caps_free(*handle); *handle = NULL, "Tachometer initialization failed. PCNT initialization failed.");
     ZH_LOGI("Tachometer initialization completed successfully.");
     return ESP_OK;
 }
@@ -121,15 +132,15 @@ esp_err_t zh_tachometer_deinit(zh_tachometer_handle_t **handle)
 {
     ZH_LOGI("Tachometer deinitialization started.");
     ZH_ERROR_CHECK(handle != NULL && *handle != NULL, ESP_ERR_INVALID_ARG, NULL, "Tachometer deinitialization failed. Invalid argument.");
-    ZH_ERROR_CHECK(pcnt_unit_stop((*handle)->pcnt_unit_handle) == ESP_OK, ESP_FAIL, NULL, "Tachometer deinitialization failed. PCNT unit stop fail.");
-    ZH_ERROR_CHECK(pcnt_unit_disable((*handle)->pcnt_unit_handle) == ESP_OK, ESP_FAIL, NULL, "Tachometer deinitialization failed. PCNT unit disable fail.");
-    ZH_ERROR_CHECK(pcnt_unit_remove_watch_point((*handle)->pcnt_unit_handle, 32767) == ESP_OK, ESP_FAIL, NULL, "Tachometer deinitialization failed. PCNT unit remove watch point fail.");
-    ZH_ERROR_CHECK(pcnt_unit_remove_watch_point((*handle)->pcnt_unit_handle, -32767) == ESP_OK, ESP_FAIL, NULL, "Tachometer deinitialization failed. PCNT unit remove watch point fail.");
-    ZH_ERROR_CHECK(pcnt_del_channel((*handle)->pcnt_channel_a_handle) == ESP_OK, ESP_FAIL, NULL, "Tachometer deinitialization failed. PCNT delete channel fail.");
-    ZH_ERROR_CHECK(pcnt_del_channel((*handle)->pcnt_channel_b_handle) == ESP_OK, ESP_FAIL, NULL, "Tachometer deinitialization failed. PCNT delete channel fail.");
-    ZH_ERROR_CHECK(pcnt_del_unit((*handle)->pcnt_unit_handle) == ESP_OK, ESP_FAIL, NULL, "Tachometer deinitialization failed. PCNT delete unit fail.");
-    ZH_ERROR_CHECK(esp_timer_stop((*handle)->esp_timer_handle) == ESP_OK, ESP_FAIL, NULL, "Tachometer deinitialization failed. Timer stop fail.");
-    ZH_ERROR_CHECK(esp_timer_delete((*handle)->esp_timer_handle) == ESP_OK, ESP_FAIL, NULL, "Tachometer deinitialization failed. Timer delete fail.");
+    ZH_ERROR_CHECK_CONT(esp_timer_stop((*handle)->esp_timer_handle) == ESP_OK, NULL, "Tachometer deinitialization failed. Timer stop fail.");
+    ZH_ERROR_CHECK_CONT(esp_timer_delete((*handle)->esp_timer_handle) == ESP_OK, NULL, "Tachometer deinitialization failed. Timer delete fail.");
+    ZH_ERROR_CHECK_CONT(pcnt_unit_stop((*handle)->pcnt_unit_handle) == ESP_OK, NULL, "Tachometer deinitialization failed. PCNT unit stop fail.");
+    ZH_ERROR_CHECK_CONT(pcnt_unit_disable((*handle)->pcnt_unit_handle) == ESP_OK, NULL, "Tachometer deinitialization failed. PCNT unit disable fail.");
+    ZH_ERROR_CHECK_CONT(pcnt_unit_remove_watch_point((*handle)->pcnt_unit_handle, 32767) == ESP_OK, NULL, "Tachometer deinitialization failed. PCNT unit remove watch point fail.");
+    ZH_ERROR_CHECK_CONT(pcnt_unit_remove_watch_point((*handle)->pcnt_unit_handle, -32767) == ESP_OK, NULL, "Tachometer deinitialization failed. PCNT unit remove watch point fail.");
+    ZH_ERROR_CHECK_CONT(pcnt_del_channel((*handle)->pcnt_channel_a_handle) == ESP_OK, NULL, "Tachometer deinitialization failed. PCNT delete channel fail.");
+    ZH_ERROR_CHECK_CONT(pcnt_del_channel((*handle)->pcnt_channel_b_handle) == ESP_OK, NULL, "Tachometer deinitialization failed. PCNT delete channel fail.");
+    ZH_ERROR_CHECK_CONT(pcnt_del_unit((*handle)->pcnt_unit_handle) == ESP_OK, NULL, "Tachometer deinitialization failed. PCNT delete unit fail.");
     heap_caps_free(*handle);
     *handle = NULL;
     ZH_LOGI("Tachometer deinitialization completed successfully.");
@@ -138,10 +149,10 @@ esp_err_t zh_tachometer_deinit(zh_tachometer_handle_t **handle)
 
 esp_err_t zh_tachometer_get(zh_tachometer_handle_t **handle, uint16_t *value)
 {
-    ZH_LOGI("Tachometer get position started.");
-    ZH_ERROR_CHECK(handle != NULL && *handle != NULL && value != NULL, ESP_ERR_INVALID_ARG, NULL, "Tachometer get position failed. Invalid argument.");
+    ZH_LOGI("Tachometer get RPM started.");
+    ZH_ERROR_CHECK(handle != NULL && *handle != NULL && value != NULL, ESP_ERR_INVALID_ARG, NULL, "Tachometer get RPM failed. Invalid argument.");
     *value = (*handle)->value;
-    ZH_LOGI("Tachometer get position completed successfully.");
+    ZH_LOGI("Tachometer get RPM completed successfully.");
     return ESP_OK;
 }
 
@@ -153,8 +164,16 @@ static esp_err_t _zh_tachometer_validate_config(const zh_tachometer_init_config_
 
 static esp_err_t _zh_tachometer_pcnt_init(const zh_tachometer_init_config_t *config, zh_tachometer_handle_t *handle)
 {
-    ZH_ERROR_CHECK(config->a_gpio_number < GPIO_NUM_MAX && config->b_gpio_number < GPIO_NUM_MAX, ESP_ERR_INVALID_ARG, NULL, "Invalid GPIO number.")
-    ZH_ERROR_CHECK(config->a_gpio_number != config->b_gpio_number, ESP_ERR_INVALID_ARG, NULL, "Encoder A and B GPIO is same.")
+    ZH_ERROR_CHECK(config->a_gpio_number < GPIO_NUM_MAX && config->b_gpio_number < GPIO_NUM_MAX, ESP_ERR_INVALID_ARG, NULL, "Invalid GPIO number.");
+    ZH_ERROR_CHECK(config->a_gpio_number != config->b_gpio_number, ESP_ERR_INVALID_ARG, NULL, "Encoder A and B GPIO is same.");
+    gpio_config_t io_config = {
+        .pin_bit_mask = (1ULL << config->a_gpio_number) | (1ULL << config->b_gpio_number),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = config->pullup == true ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ZH_ERROR_CHECK(gpio_config(&io_config) == ESP_OK, ESP_FAIL, NULL, "GPIO initialization failed.");
     pcnt_unit_config_t pcnt_unit_config = {
         .high_limit = 32767,
         .low_limit = -32767,
@@ -166,72 +185,67 @@ static esp_err_t _zh_tachometer_pcnt_init(const zh_tachometer_init_config_t *con
         .max_glitch_ns = 1000,
     };
     ZH_ERROR_CHECK(pcnt_unit_set_glitch_filter(pcnt_unit_handle, &pcnt_glitch_filter_config) == ESP_OK, ESP_FAIL,
-                   {ZH_ERROR_CHECK(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
     pcnt_chan_config_t pcnt_chan_a_config = {
         .edge_gpio_num = config->a_gpio_number,
         .level_gpio_num = config->b_gpio_number,
     };
     pcnt_channel_handle_t pcnt_channel_a_handle = NULL;
     ZH_ERROR_CHECK(pcnt_new_channel(pcnt_unit_handle, &pcnt_chan_a_config, &pcnt_channel_a_handle) == ESP_OK, ESP_FAIL,
-                   {ZH_ERROR_CHECK(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
     pcnt_chan_config_t pcnt_chan_b_config = {
         .edge_gpio_num = config->b_gpio_number,
         .level_gpio_num = config->a_gpio_number,
     };
     pcnt_channel_handle_t pcnt_channel_b_handle = NULL;
     ZH_ERROR_CHECK(pcnt_new_channel(pcnt_unit_handle, &pcnt_chan_b_config, &pcnt_channel_b_handle) == ESP_OK, ESP_FAIL,
-                   {ZH_ERROR_CHECK(pcnt_del_channel(pcnt_channel_a_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete channel fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
-    ZH_ERROR_CHECK(pcnt_channel_set_edge_action(pcnt_channel_a_handle, PCNT_CHANNEL_EDGE_ACTION_DECREASE, PCNT_CHANNEL_EDGE_ACTION_HOLD) == ESP_OK, ESP_FAIL,
-                   {ZH_ERROR_CHECK(pcnt_del_channel(pcnt_channel_a_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete channel fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_channel(pcnt_channel_b_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete channel fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
-    ZH_ERROR_CHECK(pcnt_channel_set_level_action(pcnt_channel_a_handle, PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_HOLD) == ESP_OK, ESP_FAIL,
-                   {ZH_ERROR_CHECK(pcnt_del_channel(pcnt_channel_a_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete channel fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_channel(pcnt_channel_b_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete channel fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
-    ZH_ERROR_CHECK(pcnt_channel_set_edge_action(pcnt_channel_b_handle, PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_HOLD) == ESP_OK, ESP_FAIL,
-                   {ZH_ERROR_CHECK(pcnt_del_channel(pcnt_channel_a_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete channel fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_channel(pcnt_channel_b_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete channel fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
-    ZH_ERROR_CHECK(pcnt_channel_set_level_action(pcnt_channel_b_handle, PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_HOLD) == ESP_OK, ESP_FAIL,
-                   {ZH_ERROR_CHECK(pcnt_del_channel(pcnt_channel_a_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete channel fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_channel(pcnt_channel_b_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete channel fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_channel(pcnt_channel_a_handle) == ESP_OK, NULL, "PCNT delete channel fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
+    ZH_ERROR_CHECK(pcnt_channel_set_edge_action(pcnt_channel_a_handle, PCNT_CHANNEL_EDGE_ACTION_DECREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE) == ESP_OK, ESP_FAIL,
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_channel(pcnt_channel_a_handle) == ESP_OK, NULL, "PCNT delete channel fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_channel(pcnt_channel_b_handle) == ESP_OK, NULL, "PCNT delete channel fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
+    ZH_ERROR_CHECK(pcnt_channel_set_level_action(pcnt_channel_a_handle, PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE) == ESP_OK, ESP_FAIL,
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_channel(pcnt_channel_a_handle) == ESP_OK, NULL, "PCNT delete channel fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_channel(pcnt_channel_b_handle) == ESP_OK, NULL, "PCNT delete channel fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
+    ZH_ERROR_CHECK(pcnt_channel_set_edge_action(pcnt_channel_b_handle, PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_DECREASE) == ESP_OK, ESP_FAIL,
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_channel(pcnt_channel_a_handle) == ESP_OK, NULL, "PCNT delete channel fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_channel(pcnt_channel_b_handle) == ESP_OK, NULL, "PCNT delete channel fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
+    ZH_ERROR_CHECK(pcnt_channel_set_level_action(pcnt_channel_b_handle, PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE) == ESP_OK, ESP_FAIL,
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_channel(pcnt_channel_a_handle) == ESP_OK, NULL, "PCNT delete channel fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_channel(pcnt_channel_b_handle) == ESP_OK, NULL, "PCNT delete channel fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
     ZH_ERROR_CHECK(pcnt_unit_add_watch_point(pcnt_unit_handle, 32767) == ESP_OK, ESP_FAIL,
-                   {ZH_ERROR_CHECK(pcnt_del_channel(pcnt_channel_a_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete channel fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_channel(pcnt_channel_b_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete channel fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_channel(pcnt_channel_a_handle) == ESP_OK, NULL, "PCNT delete channel fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_channel(pcnt_channel_b_handle) == ESP_OK, NULL, "PCNT delete channel fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
     ZH_ERROR_CHECK(pcnt_unit_add_watch_point(pcnt_unit_handle, -32767) == ESP_OK, ESP_FAIL,
-                   {ZH_ERROR_CHECK(pcnt_unit_remove_watch_point(pcnt_unit_handle, 32767) == ESP_OK, ESP_FAIL, NULL, "PCNT unit remove watch point fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_channel(pcnt_channel_a_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete channel fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_channel(pcnt_channel_b_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete channel fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
+                   {ZH_ERROR_CHECK_CONT(pcnt_unit_remove_watch_point(pcnt_unit_handle, 32767) == ESP_OK, NULL, "PCNT unit remove watch point fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_channel(pcnt_channel_a_handle) == ESP_OK, NULL, "PCNT delete channel fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_channel(pcnt_channel_b_handle) == ESP_OK, NULL, "PCNT delete channel fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
     ZH_ERROR_CHECK(pcnt_unit_enable(pcnt_unit_handle) == ESP_OK, ESP_FAIL,
-                   {ZH_ERROR_CHECK(pcnt_unit_remove_watch_point(pcnt_unit_handle, 32767) == ESP_OK, ESP_FAIL, NULL, "PCNT unit remove watch point fail.")};
-                   {ZH_ERROR_CHECK(pcnt_unit_remove_watch_point(pcnt_unit_handle, -32767) == ESP_OK, ESP_FAIL, NULL, "PCNT unit remove watch point fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_channel(pcnt_channel_a_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete channel fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_channel(pcnt_channel_b_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete channel fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
+                   {ZH_ERROR_CHECK_CONT(pcnt_unit_remove_watch_point(pcnt_unit_handle, 32767) == ESP_OK, NULL, "PCNT unit remove watch point fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_unit_remove_watch_point(pcnt_unit_handle, -32767) == ESP_OK, NULL, "PCNT unit remove watch point fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_channel(pcnt_channel_a_handle) == ESP_OK, NULL, "PCNT delete channel fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_channel(pcnt_channel_b_handle) == ESP_OK, NULL, "PCNT delete channel fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
     ZH_ERROR_CHECK(pcnt_unit_clear_count(pcnt_unit_handle) == ESP_OK, ESP_FAIL,
-                   {ZH_ERROR_CHECK(pcnt_unit_disable(pcnt_unit_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT unit disable fail.")};
-                   {ZH_ERROR_CHECK(pcnt_unit_remove_watch_point(pcnt_unit_handle, 32767) == ESP_OK, ESP_FAIL, NULL, "PCNT unit remove watch point fail.")};
-                   {ZH_ERROR_CHECK(pcnt_unit_remove_watch_point(pcnt_unit_handle, -32767) == ESP_OK, ESP_FAIL, NULL, "PCNT unit remove watch point fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_channel(pcnt_channel_a_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete channel fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_channel(pcnt_channel_b_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete channel fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
+                   {ZH_ERROR_CHECK_CONT(pcnt_unit_disable(pcnt_unit_handle) == ESP_OK, NULL, "PCNT unit disable fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_unit_remove_watch_point(pcnt_unit_handle, 32767) == ESP_OK, NULL, "PCNT unit remove watch point fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_unit_remove_watch_point(pcnt_unit_handle, -32767) == ESP_OK, NULL, "PCNT unit remove watch point fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_channel(pcnt_channel_a_handle) == ESP_OK, NULL, "PCNT delete channel fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_channel(pcnt_channel_b_handle) == ESP_OK, NULL, "PCNT delete channel fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
     ZH_ERROR_CHECK(pcnt_unit_start(pcnt_unit_handle) == ESP_OK, ESP_FAIL,
-                   {ZH_ERROR_CHECK(pcnt_unit_disable(pcnt_unit_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT unit disable fail.")};
-                   {ZH_ERROR_CHECK(pcnt_unit_remove_watch_point(pcnt_unit_handle, 32767) == ESP_OK, ESP_FAIL, NULL, "PCNT unit remove watch point fail.")};
-                   {ZH_ERROR_CHECK(pcnt_unit_remove_watch_point(pcnt_unit_handle, -32767) == ESP_OK, ESP_FAIL, NULL, "PCNT unit remove watch point fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_channel(pcnt_channel_a_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete channel fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_channel(pcnt_channel_b_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete channel fail.")};
-                   {ZH_ERROR_CHECK(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, ESP_FAIL, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
-    if (config->pullup == false)
-    {
-        ZH_ERROR_CHECK(gpio_pullup_dis((gpio_num_t)config->a_gpio_number) == ESP_OK, ESP_FAIL, NULL, "GPIO pullup disable fail.");
-        ZH_ERROR_CHECK(gpio_pullup_dis((gpio_num_t)config->b_gpio_number) == ESP_OK, ESP_FAIL, NULL, "GPIO pullup disable fail.");
-    }
+                   {ZH_ERROR_CHECK_CONT(pcnt_unit_disable(pcnt_unit_handle) == ESP_OK, NULL, "PCNT unit disable fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_unit_remove_watch_point(pcnt_unit_handle, 32767) == ESP_OK, NULL, "PCNT unit remove watch point fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_unit_remove_watch_point(pcnt_unit_handle, -32767) == ESP_OK, NULL, "PCNT unit remove watch point fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_channel(pcnt_channel_a_handle) == ESP_OK, NULL, "PCNT delete channel fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_channel(pcnt_channel_b_handle) == ESP_OK, NULL, "PCNT delete channel fail.")};
+                   {ZH_ERROR_CHECK_CONT(pcnt_del_unit(pcnt_unit_handle) == ESP_OK, NULL, "PCNT delete unit fail.")}, "PCNT initialization failed.");
     handle->pcnt_unit_handle = pcnt_unit_handle;
     handle->pcnt_channel_a_handle = pcnt_channel_a_handle;
     handle->pcnt_channel_b_handle = pcnt_channel_b_handle;
@@ -246,16 +260,19 @@ static esp_err_t _zh_tachometer_timer_init(zh_tachometer_handle_t *handle)
     };
     ZH_ERROR_CHECK(esp_timer_create(&timer_args, &handle->esp_timer_handle) == ESP_OK, ESP_FAIL, NULL, "Timer initialization failed.");
     ZH_ERROR_CHECK(esp_timer_start_periodic(handle->esp_timer_handle, 10000) == ESP_OK, ESP_FAIL,
-                   {ZH_ERROR_CHECK(esp_timer_delete(handle->esp_timer_handle) == ESP_OK, ESP_FAIL, NULL, "Timer delete fail.")}, "Timer initialization failed.");
+                   {ZH_ERROR_CHECK_CONT(esp_timer_delete(handle->esp_timer_handle) == ESP_OK, NULL, "Timer delete fail.")}, "Timer initialization failed.");
     return ESP_OK;
 }
 
-static void IRAM_ATTR _zh_tachometer_timer_on_alarm_cb(void *arg)
+static void _zh_tachometer_timer_on_alarm_cb(void *arg)
 {
     zh_tachometer_handle_t *handle = (zh_tachometer_handle_t *)arg;
     int pcnt_count = 0;
-    ZH_ERROR_CHECK_VOID(pcnt_unit_get_count(handle->pcnt_unit_handle, &pcnt_count) == ESP_OK, NULL, "PCNT internal error.");
-    ZH_ERROR_CHECK_VOID(pcnt_unit_clear_count(handle->pcnt_unit_handle) == ESP_OK, NULL, "PCNT internal error.");
-    float value_temp = ((pcnt_count * 100.0) / handle->encoder_pulses) * 60;
-    handle->value = (uint16_t)fabs(value_temp);
+    if (handle->pcnt_unit_handle != NULL)
+    {
+        ZH_ERROR_CHECK_VOID(pcnt_unit_get_count(handle->pcnt_unit_handle, &pcnt_count) == ESP_OK, NULL, "PCNT internal error.");
+        ZH_ERROR_CHECK_VOID(pcnt_unit_clear_count(handle->pcnt_unit_handle) == ESP_OK, NULL, "PCNT internal error.");
+        float value_temp = (pcnt_count * 100.0) / (4.0 * handle->encoder_pulses) * 60.0;
+        handle->value = (uint16_t)fabsf(value_temp);
+    }
 }

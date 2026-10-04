@@ -62,10 +62,10 @@ extern "C"
      */
     typedef struct
     {
-        uint8_t a_gpio_number;   /*!< Encoder A phase GPIO number */
-        uint8_t b_gpio_number;   /*!< Encoder B phase GPIO number */
-        bool pullup;             /*!< Enable or disable GPIO pull-up resistors */
-        uint16_t encoder_pulses; /*!< Number of pulses per one full rotation */
+        gpio_num_t a_gpio_number; /*!< Encoder A phase GPIO number */
+        gpio_num_t b_gpio_number; /*!< Encoder B phase GPIO number */
+        bool pullup;              /*!< Enable or disable GPIO pull-up resistors */
+        uint16_t encoder_pulses;  /*!< Number of pulses per one full rotation */
     } zh_tachometer_init_config_t;
 
     /**
@@ -78,7 +78,7 @@ extern "C"
      * @param[out] handle Pointer to receive the created tachometer handle (must be NULL)
      *
      * @return ESP_OK on success
-     * @return ESP_ERR_INVALID_ARG if `config` or `handle` is NULL, or `encoder_pulses` is zero
+     * @return ESP_ERR_INVALID_ARG if `config` or `handle` is NULL, `encoder_pulses` is zero, or GPIO numbers are invalid or identical
      * @return ESP_ERR_INVALID_STATE if the handle is already initialized
      * @return ESP_ERR_NO_MEM if memory allocation fails
      * @return ESP_FAIL if PCNT initialization or configuration failed
@@ -110,11 +110,11 @@ extern "C"
      * The value represents absolute RPM (direction is discarded); negative
      * rotation is reported as a positive value.
      *
-     * @param[in] handle Pointer to the tachometer handle (must not be NULL)
+     * @param[in] handle Pointer to the tachometer handle (must not be NULL, and *handle must not be NULL)
      * @param[out] value Pointer to receive the RPM value (must not be NULL)
      *
      * @return ESP_OK on success
-     * @return ESP_ERR_INVALID_ARG if `handle` or `value` is NULL
+     * @return ESP_ERR_INVALID_ARG if `handle`, `*handle`, or `value` is NULL
      *
      * @note This function is non-blocking and returns the most recent value
      *       without accessing the PCNT peripheral directly.
